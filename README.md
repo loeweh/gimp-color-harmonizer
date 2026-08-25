@@ -1,68 +1,77 @@
 # GIMP 3.2 Color Harmonizer Plugin 🎨
 
-Ein leistungsstarkes GIMP-Plugin zur **automatischen Farbanpassung, Beleuchtungskorrektur und Kantenverschmelzung**, wenn Auswahlen oder Ebenen von anderen Bildern eingefügt werden (ähnlich wie in *Facefusion*, *Roop* und professionellen Compositing-Pipelines).
+A powerful GIMP 3.x plugin for **automatic color transfer, lighting harmonization, and seamless edge blending** when pasting elements, faces, or objects from other images (Facefusion / Roop / professional compositing style).
 
 ---
 
-## 📂 Speicherort
+## 🚀 Quick Start & Installation
 
-Das Plugin und alle zugehörigen Dateien befinden sich in Deinem Home-Verzeichnis unter:
-```bash
-/home/loewe/tarot/gimp-color-harmonizer/
-```
-
-Dateien im Ordner:
-* [`color_harmonizer.py`](color_harmonizer.py): Das eigentliche GIMP 3.2 Python-Plugin.
-* [`install.sh`](install.sh): Installations-Skript zur automatischen Verlinkung/Installation in GIMP 3.2.
-* [`test_plugin.py`](test_plugin.py): Unit-Tests für alle 4 mathematischen Farbanpassungs-Methoden.
-* [`README.md`](README.md): Diese Dokumentation.
-
----
-
-## 🚀 Installation
-
-Führe einfach im Terminal folgendes Installations-Skript aus:
+Clone the repository and run the installer script:
 
 ```bash
-cd /home/loewe/tarot/gimp-color-harmonizer
+git clone https://github.com/loeweh/gimp-color-harmonizer.git
+cd gimp-color-harmonizer
 ./install.sh
 ```
 
-Das Skript kopiert das Plugin nach:
+The script automatically copies the plugin to your GIMP 3.2 plug-ins directory:
 `~/.config/GIMP/3.2/plug-ins/color_harmonizer/color_harmonizer.py`
 
-*(GIMP 3 benötigt für jedes Python-Plugin einen eigenen Unterordner mit ausführbarer Datei).*
+*(Note: GIMP 3 requires each Python plugin to reside in its own folder with executable permissions).*
 
 ---
 
-## 🛠️ Verwendung in GIMP 3.2
+## 🛠️ How to Use in GIMP 3.2
 
-1. Öffne Dein Zielbild in GIMP (z.B. Hintergrund / Szene).
-2. Kopiere ein Objekt, Gesicht oder Element aus einem anderen Bild und füge es als **neue Ebene** ein (`Bearbeiten -> Einfügen als -> Neue Ebene`).
-3. Positioniere die Ebene an die gewünschte Stelle.
-4. Stelle sicher, dass die neu eingefügte Ebene aktiv ausgewählt ist.
-5. Öffne im Menü:
-   **`Farben` ➔ `Farben harmonisieren (Color Harmonizer)...`**
-6. Wähle die gewünschte Methode und Stärke aus und klicke auf **OK**.
+1. Open your target image or background in GIMP.
+2. Copy an element, person, or face from another image and paste it as a **new layer** (`Edit -> Paste As -> New Layer`).
+3. Position the layer where you want it.
+4. Ensure the newly pasted layer is selected/active in the layer stack.
+5. In the top menu, go to:
+   **`Colors` ➔ `Farben harmonisieren (Color Harmonizer)...`**
+6. Choose your preferred algorithm, adjust the strength slider, and click **OK**.
 
 ---
 
-## 🎛️ Die 4 wählbaren Methoden im Detail
+## 🎛️ The 4 Selectable Algorithms
 
-| Methode | Farbraum / Prinzip | Wann am besten geeignet? |
+| Method | Principle & Color Space | Best Use Case |
 | :--- | :--- | :--- |
-| **1. Reinhard Color Transfer** *(Standard)* | **CIELAB**-Farbraum $(\mu, \sigma)$ Skalierung | **Gesichter, Hauttöne, Personen, allgemeines Compositing.** Äußerst natürlich, vermeidet Farbübersteuerungen (Facefusion-Standard). |
-| **2. Linear Covariance (MKL)** | Monge-Kantorovitch Kovarianz-Matrix | **Komplexe Beleuchtung** mit mehreren Lichtquellen oder Farbverläufen. Berücksichtigt die Korrelation zwischen Farbkanälen. |
-| **3. Histogram Matching (CDF)** | Kumulative Häufigkeitsverteilung pro Kanal | **Strukturierte Texturen & detailreiche Objekte**, wenn nicht nur die Durchschnittsfarbe, sondern auch der Dynamikumfang/Kontrast exakt übertragen werden soll. |
-| **4. Seamless Blending** | Reinhard + Multi-Band Laplace-/Gauß-Pyramiden | Wenn das eingefügte Objekt **weich mit dem Hintergrund verschmelzen** soll, um sichtbare Kanten und Beleuchtungssprünge nahtlos auszugleichen. |
+| **1. Reinhard Color Transfer** *(Default)* | **CIELAB** $(\mu, \sigma)$ mean & standard deviation matching | **Faces, skin tones, portraits, and general photo compositing.** Extremely natural, avoids over-saturation (Facefusion standard). |
+| **2. Linear Covariance (MKL)** | Monge-Kantorovitch linear covariance matrix transfer | **Complex lighting conditions** with multiple light sources or cross-channel color casts. |
+| **3. Histogram Matching (CDF)** | Cumulative distribution function matching per channel | **Textured surfaces & detailed objects** where both color tone and local tonal contrast need to match. |
+| **4. Seamless Blending** | Reinhard LAB + Multi-Band Laplacian/Gaussian Pyramids | When the pasted object needs to **smoothly blend into the background** without harsh cut-out edges or lighting seams. |
 
 ---
 
-## ⚙️ Optionen im Einstellungsdialog
+## ⚙️ Plugin Options
 
-* **Methode:** Auswahl aus den 4 oben genannten Algorithmen.
-* **Stärke (0 – 100%):** Stufenloses Einblenden zwischen Original (0%) und vollständiger Farbanpassung (100%).
-* **Helligkeit anpassen:** Wenn aktiviert, wird auch die Belichtung/Helligkeit angeglichen. Wenn deaktiviert, wird nur die Farbgebung (Farbton & Sättigung) geändert, während die eigene Helligkeit erhalten bleibt.
-* **Referenz-Quelle:**
-  * *Darunterliegende Ebene (Standard):* Verwendet automatisch die Ebene direkt unter dem eingefügten Element.
-  * *Unterste Ebene (Hintergrund):* Verwendet immer die Basis-Hintergrundebene des Projekts.
+* **Method:** Choose between the 4 color transfer and harmonization algorithms.
+* **Strength (0 – 100%):** Smooth slider to blend between original colors (0%) and fully matched colors (100%).
+* **Match Luminance:** When enabled, brightness and contrast are matched as well. When disabled, only color tint/hue/chrominance is transferred while preserving original brightness.
+* **Reference Source:**
+  * *Layer Below (Default):* Automatically samples colors from the layer directly underneath the active layer.
+  * *Bottom Layer (Background):* Samples colors from the bottom-most background layer of the project.
+
+---
+
+## 📦 Requirements
+
+* **GIMP 3.0 / 3.2+** (with Python 3 support)
+* **NumPy** (standard in Python environments)
+
+---
+
+## 🧪 Testing
+
+To run the built-in algorithm test suite:
+
+```bash
+python3 test_plugin.py
+```
+
+---
+
+## 📄 License
+
+MIT License. Free to use and modify for personal and commercial projects.
