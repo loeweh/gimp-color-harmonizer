@@ -53,7 +53,6 @@ def linear_to_srgb(rgb_lin):
 def rgb_to_lab(rgb):
     """Konvertiert sRGB [0..1] zu CIELAB (L: 0..100, a: -128..127, b: -128..127)."""
     rgb_lin = srgb_to_linear(rgb)
-    # sRGB nach XYZ (D65)
     M = np.array([
         [0.4124564, 0.3575761, 0.1804375],
         [0.2126729, 0.7151522, 0.0721750],
@@ -61,7 +60,6 @@ def rgb_to_lab(rgb):
     ], dtype=np.float32)
     xyz = np.dot(rgb_lin, M.T)
     
-    # Referenz-Weißpunkt D65
     xyz_ref = np.array([0.95047, 1.00000, 1.08883], dtype=np.float32)
     xyz_norm = xyz / xyz_ref
     
@@ -92,7 +90,6 @@ def lab_to_rgb(lab):
     xyz_ref = np.array([0.95047, 1.00000, 1.08883], dtype=np.float32)
     xyz = np.stack([x, y, z], axis=-1) * xyz_ref
     
-    # XYZ nach linearem RGB
     M_inv = np.array([
         [ 3.2404542, -1.5371385, -0.4985314],
         [-0.9692660,  1.8760108,  0.0415560],
@@ -107,14 +104,10 @@ def lab_to_rgb(lab):
 # ============================================================================
 
 def apply_reinhard(src_rgb, src_samples, ref_samples, match_luminance=True, strength=1.0):
-    """
-    1. Reinhard Color Transfer (CIELAB)
-    Passt Mittelwerte und Standardabweichungen der Farbräume an.
-    """
+    """1. Reinhard Color Transfer (CIELAB)"""
     src_lab_samples = rgb_to_lab(src_samples)
     ref_lab_samples = rgb_to_lab(ref_samples)
     
-    # Mittelwerte & Standardabweichungen
     mu_s = np.mean(src_lab_samples, axis=0)
     sigma_s = np.std(src_lab_samples, axis=0) + 1e-5
     
@@ -124,29 +117,22 @@ def apply_reinhard(src_rgb, src_samples, ref_samples, match_luminance=True, stre
     src_lab = rgb_to_lab(src_rgb)
     out_lab = np.zeros_like(src_lab)
     
-    # L-Kanal (Helligkeit)
     if match_luminance:
         out_lab[..., 0] = ((src_lab[..., 0] - mu_s[0]) / sigma_s[0]) * sigma_r[0] + mu_r[0]
     else:
         out_lab[..., 0] = src_lab[..., 0]
         
-    # a- und b-Kanäle (Farbe & Chromatizität)
     out_lab[..., 1] = ((src_lab[..., 1] - mu_s[1]) / sigma_s[1]) * sigma_r[1] + mu_r[1]
     out_lab[..., 2] = ((src_lab[..., 2] - mu_s[2]) / sigma_s[2]) * sigma_r[2] + mu_r[2]
     
     out_lab[..., 0] = np.clip(out_lab[..., 0], 0.0, 100.0)
     out_rgb = lab_to_rgb(out_lab)
     
-    # Stärke einblenden
     return np.clip((1.0 - strength) * src_rgb + strength * out_rgb, 0.0, 1.0)
 
 
 def apply_mkl(src_rgb, src_samples, ref_samples, strength=1.0):
-    """
-    2. Monge-Kantorovitch Linear (MKL) / Kovarianz-Anpassung
-    Überträgt Kovarianzmatrizen der Farbverteilung.
-    """
-    # Stichproben flach
+    """2. Monge-Kantorovitch Linear (MKL) / Kovarianz-Anpassung"""
     X_s = src_samples.reshape(-1, 3).astype(np.float64)
     X_r = ref_samples.reshape(-1, 3).astype(np.float64)
     
@@ -156,22 +142,18 @@ def apply_mkl(src_rgb, src_samples, ref_samples, strength=1.0):
     cov_s = np.cov(X_s, rowvar=False) + 1e-5 * np.eye(3)
     cov_r = np.cov(X_r, rowvar=False) + 1e-5 * np.eye(3)
     
-    # Matrix-Wurzeln mittels Eigenwertzerlegung
     w_s, v_s = np.linalg.eigh(cov_s)
     w_s = np.maximum(w_s, 1e-6)
     cov_s_sqrt = v_s @ np.diag(np.sqrt(w_s)) @ v_s.T
     cov_s_inv_sqrt = v_s @ np.diag(1.0 / np.sqrt(w_s)) @ v_s.T
     
-    # Bures-Wasserstein Matrix
     inner = cov_s_sqrt @ cov_r @ cov_s_sqrt
     w_i, v_i = np.linalg.eigh(inner)
     w_i = np.maximum(w_i, 1e-6)
     inner_sqrt = v_i @ np.diag(np.sqrt(w_i)) @ v_i.T
     
-    # Transfer-Matrix
     T = cov_s_inv_sqrt @ inner_sqrt @ cov_s_inv_sqrt
     
-    # Anwenden auf Quellbild
     orig_shape = src_rgb.shape
     X_src_all = src_rgb.reshape(-1, 3).astype(np.float64)
     X_out = (X_src_all - mu_s) @ T + mu_r
@@ -181,10 +163,7 @@ def apply_mkl(src_rgb, src_samples, ref_samples, strength=1.0):
 
 
 def apply_histogram(src_rgb, src_samples, ref_samples, match_luminance=True, strength=1.0):
-    """
-    3. Histogram Matching (CDF)
-    Überträgt kumulative Verteilungsfunktionen der Farbkanäle in LAB.
-    """
+    """3. Histogram Matching (CDF)"""
     src_lab_samples = rgb_to_lab(src_samples)
     ref_lab_samples = rgb_to_lab(ref_samples)
     
@@ -199,24 +178,18 @@ def apply_histogram(src_rgb, src_samples, ref_samples, match_luminance=True, str
         s_sample_chan = src_lab_samples[..., c].flatten()
         r_sample_chan = ref_lab_samples[..., c].flatten()
         
-        # Sortierte Zielwerte als Quantile
         r_sorted = np.sort(r_sample_chan)
         r_quantiles = np.linspace(0.0, 1.0, len(r_sorted))
         
-        # Ränge der Quell-Stichprobe
         s_chan_full = src_lab[..., c]
         flat_s = s_chan_full.flatten()
         
-        # Approximatives Quantil-Mapping via Histogramm-CDF
         hist_s, bin_edges = np.histogram(s_sample_chan, bins=256)
         cdf_s = np.cumsum(hist_s).astype(np.float64)
         cdf_s /= (cdf_s[-1] + 1e-10)
         
-        # Bin-Zentren
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
-        # Mappe jeden Quell-Pixel auf dessen Perzentil
         ranks = np.interp(flat_s, bin_centers, cdf_s, left=0.0, right=1.0)
-        # Mappe Perzentil auf Ziel-Verteilung
         mapped = np.interp(ranks, r_quantiles, r_sorted)
         out_lab[..., c] = mapped.reshape(s_chan_full.shape)
         
@@ -234,13 +207,11 @@ def fast_gaussian_blur(img, radius=4, passes=3):
     is_3d = (out.ndim == 3)
     
     for _ in range(passes):
-        # Horizontaler Durchlauf
         pad_shape = ((0, 0), (radius + 1, radius), (0, 0)) if is_3d else ((0, 0), (radius + 1, radius))
         padded = np.pad(out, pad_shape, mode='edge')
         cs = np.cumsum(padded, axis=1)
         out = (cs[:, kernel_size:] - cs[:, :-kernel_size]) / kernel_size
             
-        # Vertikaler Durchlauf
         pad_shape = ((radius + 1, radius), (0, 0), (0, 0)) if is_3d else ((radius + 1, radius), (0, 0))
         padded = np.pad(out, pad_shape, mode='edge')
         cs = np.cumsum(padded, axis=0)
@@ -250,26 +221,17 @@ def fast_gaussian_blur(img, radius=4, passes=3):
 
 
 def apply_seamless(src_rgb, src_alpha, ref_bg_crop, src_samples, ref_samples, match_luminance=True, strength=1.0):
-    """
-    4. Seamless Blending (Multi-Band / Poisson Hybrid)
-    Führt Farbanpassung via Reinhard durch und harmonisiert weich die Kantenübergänge
-    über Multi-Frequenz-Pyramiden mit dem Hintergrund darunter.
-    """
-    # 1. Zuerst Farbton anpassen
+    """4. Seamless Blending (Multi-Band / Poisson Hybrid)"""
     harmonized = apply_reinhard(src_rgb, src_samples, ref_samples, match_luminance, strength=1.0)
     
-    # 2. Wenn Hintergrund vorhanden ist, Kanten-Gradienten harmonisieren
     if ref_bg_crop is not None and ref_bg_crop.shape == src_rgb.shape:
-        # Weiche Kantenmaske
         smooth_alpha = fast_gaussian_blur(src_alpha, radius=3, passes=2)
         smooth_alpha = np.clip(smooth_alpha[..., None], 0.0, 1.0)
         
-        # Niederfrequente Beleuchtungsdifferenz an den Kanten
         low_src = fast_gaussian_blur(harmonized, radius=8, passes=2)
         low_bg = fast_gaussian_blur(ref_bg_crop, radius=8, passes=2)
         high_src = harmonized - low_src
         
-        # Multi-Band Verschmelzung
         blended_low = low_src * smooth_alpha + low_bg * (1.0 - smooth_alpha)
         reconstructed = np.clip(blended_low + high_src, 0.0, 1.0)
         out_rgb = reconstructed
@@ -320,7 +282,6 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
             if ref_layer == drawable:
                 ref_layer = all_layers[0] if len(all_layers) > 1 else None
         else:
-            # Standard: Darunterliegende Ebene
             try:
                 cur_idx = all_layers.index(drawable)
                 if cur_idx + 1 < len(all_layers):
@@ -331,11 +292,10 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
                 if len(all_layers) > 1:
                     ref_layer = all_layers[-1]
 
-        # Wenn keine separate Ebene vorhanden ist, verwenden wir das Gesamte Bild
         if ref_layer is None:
             ref_layer = drawable
 
-        # 2. Pixel der aktiven Quelle auslesen
+        # 2. Pixel der Quelle auslesen
         s_w = drawable.get_width()
         s_h = drawable.get_height()
         s_ok, s_ox, s_oy = drawable.get_offsets()
@@ -348,40 +308,70 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
         s_rgb = s_arr[..., :3].astype(np.float32) / 255.0
         s_alpha = s_arr[..., 3].astype(np.float32) / 255.0
 
-        # Nicht-transparente Pixel für Farbstatistik
+        # Sichtbare Quellpixel
         valid_src = (s_alpha > 0.05)
         if np.sum(valid_src) < 10:
             valid_src = np.ones((s_h, s_w), dtype=bool)
         src_samples = s_rgb[valid_src]
 
-        # 3. Referenz-Pixel auslesen
+        # 3. Zielpixel räumlich exakt unter der Quelle auslesen
         r_w = ref_layer.get_width()
         r_h = ref_layer.get_height()
         r_ok, r_ox, r_oy = ref_layer.get_offsets()
-        
         r_buf = ref_layer.get_buffer()
-        r_rect = Gegl.Rectangle.new(0, 0, r_w, r_h)
-        r_bytes = r_buf.get(r_rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.NONE)
-        r_arr = np.frombuffer(r_bytes, dtype=np.uint8).reshape((r_h, r_w, 4))
-        
-        r_rgb = r_arr[..., :3].astype(np.float32) / 255.0
-        r_alpha = r_arr[..., 3].astype(np.float32) / 255.0
 
-        valid_ref = (r_alpha > 0.05)
-        if np.sum(valid_ref) < 10:
-            valid_ref = np.ones((r_h, r_w), dtype=bool)
-        ref_samples = r_rgb[valid_ref]
+        # Schnittmenge beider Ebenen auf der Gesamtleinwand berechnen
+        inter_x1 = max(s_ox, r_ox)
+        inter_y1 = max(s_oy, r_oy)
+        inter_x2 = min(s_ox + s_w, r_ox + r_w)
+        inter_y2 = min(s_oy + s_h, r_oy + r_h)
 
-        # Hintergrund-Ausschnitt für Seamless Blending extrahieren (falls überlappend)
-        ref_crop = None
-        if method == 'seamless' and ref_layer != drawable:
-            # Berechne relative Koordinaten auf der Referenz-Ebene
-            rel_x = s_ox - r_ox
-            rel_y = s_oy - r_oy
-            if 0 <= rel_x and rel_x + s_w <= r_w and 0 <= rel_y and rel_y + s_h <= r_h:
-                ref_crop = r_rgb[rel_y:rel_y+s_h, rel_x:rel_x+s_w]
+        ref_samples = None
+        ref_crop = np.zeros((s_h, s_w, 3), dtype=np.float32)
 
-        # 4. Gewählte Methode ausführen
+        if inter_x2 > inter_x1 and inter_y2 > inter_y1:
+            # Koordinaten bezogen auf Quelle
+            sx_start = inter_x1 - s_ox
+            sy_start = inter_y1 - s_oy
+            sx_end = inter_x2 - s_ox
+            sy_end = inter_y2 - s_oy
+            
+            # Koordinaten bezogen auf Referenzebene
+            rx_start = inter_x1 - r_ox
+            ry_start = inter_y1 - r_oy
+            rw_inter = inter_x2 - inter_x1
+            rh_inter = inter_y2 - inter_y1
+
+            # Nur den überlappenden Ausschnitt aus der Referenzebene holen
+            r_sub_rect = Gegl.Rectangle.new(rx_start, ry_start, rw_inter, rh_inter)
+            r_sub_bytes = r_buf.get(r_sub_rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.NONE)
+            r_sub_arr = np.frombuffer(r_sub_bytes, dtype=np.uint8).reshape((rh_inter, rw_inter, 4))
+            
+            r_sub_rgb = r_sub_arr[..., :3].astype(np.float32) / 255.0
+            r_sub_alpha = r_sub_arr[..., 3].astype(np.float32) / 255.0
+            s_sub_alpha = s_alpha[sy_start:sy_end, sx_start:sx_end]
+
+            # Referenz-Crop für Seamless Blending vorbereiten
+            ref_crop[sy_start:sy_end, sx_start:sx_end] = r_sub_rgb
+
+            # MASKIERUNG: Nur Pixel verwenden, die in der QUELLE UND in der REFERENZ nicht transparent sind!
+            valid_overlap = (s_sub_alpha > 0.05) & (r_sub_alpha > 0.05)
+            if np.sum(valid_overlap) >= 10:
+                ref_samples = r_sub_rgb[valid_overlap]
+
+        # Sicherheits-Fallback: Falls keine Überlappung vorhanden ist, ganze Referenzebene nutzen
+        if ref_samples is None:
+            r_rect = Gegl.Rectangle.new(0, 0, r_w, r_h)
+            r_bytes = r_buf.get(r_rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.NONE)
+            r_arr = np.frombuffer(r_bytes, dtype=np.uint8).reshape((r_h, r_w, 4))
+            r_rgb_full = r_arr[..., :3].astype(np.float32) / 255.0
+            r_alpha_full = r_arr[..., 3].astype(np.float32) / 255.0
+            valid_ref = (r_alpha_full > 0.05)
+            if np.sum(valid_ref) < 10:
+                valid_ref = np.ones((r_h, r_w), dtype=bool)
+            ref_samples = r_rgb_full[valid_ref]
+
+        # 4. Gewählte Methode anwenden
         if method == 'reinhard':
             out_rgb = apply_reinhard(s_rgb, src_samples, ref_samples, match_luminance, strength)
         elif method == 'mkl':
@@ -411,7 +401,6 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
 
 
 class ColorHarmonizerPlugin(Gimp.PlugIn):
-    ## GimpPlugIn virtuelle Methoden ##
     def do_set_i18n(self, procname):
         return True, 'gimp30-python', None
 
@@ -453,7 +442,7 @@ class ColorHarmonizerPlugin(Gimp.PlugIn):
 
         procedure.add_choice_argument(
             "method",
-            _("_Methode"),
+            _("Methode"),
             _("Farbangleichungs-Algorithmus"),
             choice_method,
             "reinhard",
@@ -463,7 +452,7 @@ class ColorHarmonizerPlugin(Gimp.PlugIn):
         # 2. Stärke (Schieberegler 0..100)
         procedure.add_double_argument(
             "strength",
-            _("_Stärke (%)"),
+            _("Stärke (%)"),
             _("Stärke der Angleichung von 0% (Original) bis 100% (Vollständig)"),
             0.0, 100.0, 100.0,
             GObject.ParamFlags.READWRITE
@@ -472,7 +461,7 @@ class ColorHarmonizerPlugin(Gimp.PlugIn):
         # 3. Helligkeit berücksichtigen (Checkbox)
         procedure.add_boolean_argument(
             "match_luminance",
-            _("_Helligkeit anpassen"),
+            _("Helligkeit anpassen"),
             _("Helligkeit und Kontrast ebenfalls anpassen (deaktivieren für reine Farbtonangleichung)"),
             True,
             GObject.ParamFlags.READWRITE
@@ -480,12 +469,12 @@ class ColorHarmonizerPlugin(Gimp.PlugIn):
 
         # 4. Referenzquelle (Dropdown)
         choice_ref = Gimp.Choice.new()
-        choice_ref.add("layer_below", 0, _("Darunterliegende Ebene (Standard)"), _("Verwendet die Ebene direkt unter der aktiven Ebene als Farbreferenz"))
-        choice_ref.add("background", 1, _("Unterste Ebene (Hintergrund)"), _("Verwendet immer die unterste Ebene im Bild"))
+        choice_ref.add("layer_below", 0, _("Darunterliegende Ebene (Standard)"), _("Verwendet den Bereich der direkt darunter liegenden Ebene"))
+        choice_ref.add("background", 1, _("Unterste Ebene (Hintergrund)"), _("Verwendet den Bereich der untersten Ebene im Bild"))
 
         procedure.add_choice_argument(
             "ref_mode",
-            _("_Referenz-Quelle"),
+            _("Referenz-Quelle"),
             _("Welche Ebene als Farbvorlage dienen soll"),
             choice_ref,
             "layer_below",
