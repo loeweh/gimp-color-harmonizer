@@ -1,28 +1,35 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Installations-Skript für das GIMP 3.2 Color Harmonizer Plugin
+# Installations-Skript für das GIMP 3 Color Harmonizer Plugin
 # ==============================================================================
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GIMP_PLUGIN_DIR="${HOME}/.config/GIMP/3.2/plug-ins/color_harmonizer"
 
-echo "=== GIMP 3.2 Color Harmonizer Installer ==="
+echo "=== GIMP 3.x Color Harmonizer Installer ==="
 echo "Quellordner: ${SCRIPT_DIR}"
-echo "Zielordner:  ${GIMP_PLUGIN_DIR}"
 
-# Zielverzeichnis erstellen
-mkdir -p "${GIMP_PLUGIN_DIR}"
+TARGET_DIRS=(
+    "${HOME}/.config/GIMP/3.2/plug-ins/color_harmonizer"
+    "${HOME}/.config/GIMP/3.2/plug-ins/color-harmonizer"
+    "${HOME}/.config/GIMP/3.0/plug-ins/color_harmonizer"
+    "${HOME}/.config/GIMP/3.0/plug-ins/color-harmonizer"
+)
 
-# Plugin kopieren und ausführbar machen
-cp "${SCRIPT_DIR}/color_harmonizer.py" "${GIMP_PLUGIN_DIR}/color_harmonizer.py"
-chmod +x "${GIMP_PLUGIN_DIR}/color_harmonizer.py"
+for DIR in "${TARGET_DIRS[@]}"; do
+    mkdir -p "${DIR}"
+    cp "${SCRIPT_DIR}/color_harmonizer.py" "${DIR}/color_harmonizer.py"
+    cp "${SCRIPT_DIR}/color_harmonizer.py" "${DIR}/color-harmonizer.py"
+    chmod +x "${DIR}/color_harmonizer.py" "${DIR}/color-harmonizer.py"
+    echo "  -> Installiert in: ${DIR}"
+done
 
 echo ""
 echo "✅ Installation erfolgreich abgeschlossen!"
-echo "Das Plugin ist installiert unter: ${GIMP_PLUGIN_DIR}/color_harmonizer.py"
 echo ""
-echo "In GIMP 3.2 findest Du das Plugin unter:"
-echo "Menü: Farben -> Farben harmonisieren (Color Harmonizer)..."
+echo "WICHTIG:"
+echo "1. Falls GIMP bereits geöffnet ist: Bitte GIMP KOMPLETT SCHLIESSEN und NEU STARTEN."
+echo "2. Das Plugin findest Du dann im Menü unter:"
+echo "   Colors -> Farben harmonisieren (Color Harmonizer)..."
 echo "==========================================="
