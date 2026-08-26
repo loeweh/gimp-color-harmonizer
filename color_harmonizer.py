@@ -326,12 +326,29 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
         error = GLib.Error.new_literal(Gimp.PlugIn.error_quark(), msg, 0)
         return procedure.new_return_values(Gimp.PDBStatusType.CALLING_ERROR, error)
 
+    all_layers = image.get_layers()
+    has_selection = not Gimp.Selection.is_empty(image)
+
     # Interaktiver Dialog mit Live-Vorschau
     if run_mode == Gimp.RunMode.INTERACTIVE:
         GimpUi.init('python-fu-color-harmonizer')
         dialog = GimpUi.ProcedureDialog(procedure=procedure, config=config)
 
-        # Live-Vorschau Widget einbinden
+        # Referenzebene für die Vorschau vorbereiten
+        ref_layer_for_preview = None
+        if len(drawables) > 0 and len(all_layers) > 1:
+            try:
+                cur_idx = all_layers.index(drawables[0])
+                if cur_idx + 1 < len(all_layers):
+                    ref_layer_for_preview = all_layers[cur_idx + 1]
+                elif cur_idx > 0:
+                    ref_layer_for_preview = all_layers[cur_idx - 1]
+            except ValueError:
+                ref_layer_for_preview = all_layers[-1]
+        if ref_layer_for_preview is None and len(drawables) > 0:
+            ref_layer_for_preview = drawables[0]
+
+        preview_ok = False
         if len(drawables) > 0 and hasattr(dialog, 'get_drawable_preview'):
             try:
                 preview = dialog.get_drawable_preview("preview", drawables[0])
@@ -374,9 +391,23 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
                                     picked = np.array([cr, cg, cb], dtype=np.float32)
                                     np.random.seed(42)
                                     r_samples = np.clip(picked + np.random.normal(0, 0.03, (100, 3)), 0.0, 1.0).astype(np.float32)
+                            elif ref_layer_for_preview is not None:
+                                try:
+                                    target_ref = all_layers[-1] if (cur_ref == 'background' and len(all_layers) > 1) else ref_layer_for_preview
+                                    rw = target_ref.get_width()
+                                    rh = target_ref.get_height()
+                                    r_sub_rect = Gegl.Rectangle.new(0, 0, min(rw, 256), min(rh, 256))
+                                    r_sub_bytes = target_ref.get_buffer().get(r_sub_rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.NONE)
+                                    r_sub_arr = np.frombuffer(r_sub_bytes, dtype=np.uint8).reshape((min(rh, 256), min(rw, 256), 4))
+                                    r_sub_rgb = r_sub_arr[..., :3].astype(np.float32) / 255.0
+                                    r_sub_alpha = r_sub_arr[..., 3].astype(np.float32) / 255.0
+                                    v_ref = (r_sub_alpha > 0.05)
+                                    if np.sum(v_ref) >= 10:
+                                        r_samples = r_sub_rgb[v_ref]
+                                except Exception:
+                                    pass
                             
                             if r_samples is None:
-                                # Fallback auf simple Helligkeitsanpassung für Vorschau
                                 r_samples = s_samples
                                 
                             out_p_rgb = process_color_harmonization(
@@ -390,10 +421,24 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
                             pass
 
                     preview.connect("invalidated", on_preview_invalidated)
+                    preview_ok = True
             except Exception:
                 pass
 
-        dialog.fill(None)
+        if preview_ok:
+            dialog.fill([
+                "preview",
+                "method",
+                "strength",
+                "protect_whites",
+                "shading_transfer",
+                "match_luminance",
+                "ref_mode",
+                "custom_color"
+            ])
+        else:
+            dialog.fill(None)
+
         if not dialog.run():
             dialog.destroy()
             return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
@@ -408,9 +453,6 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
 
     Gimp.context_push()
     image.undo_group_start()
-
-    all_layers = image.get_layers()
-    has_selection = not Gimp.Selection.is_empty(image)
 
     for drawable in drawables:
         if not isinstance(drawable, Gimp.Layer):
