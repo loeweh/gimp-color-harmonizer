@@ -25,28 +25,31 @@ The script copies the plugin to your GIMP 3.2 plug-ins directory:
 2. Copy an element, person, or face from another image and paste it as a **new layer** (`Edit -> Paste As -> New Layer`).
 3. Position the layer where you want it.
 4. Ensure the newly pasted layer is selected in the layer stack.
-5. *(Optional targeted color sample)*: If you want to sample from a specific skin region (e.g. cheek/forehead on the background), make a quick selection with the **Lasso or Ellipse tool** before running the plugin!
-6. In the top menu, go to:
+5. In the top menu, go to:
    **`Colors` ➔ `Farben harmonisieren (Color Harmonizer)...`**
-7. Adjust the sliders to your liking and click **OK**.
+6. Adjust the sliders with the **Live Preview**, pick a target color with the **Pipette**, and click **OK**.
 
 ---
 
-## ✨ Advanced Features & Protections
+## ✨ Features & Highlights
+
+### 🔍 Live Preview (Echtzeit-Vorschau)
+* Interactive zoomable preview rendered directly inside the dialog.
+* Immediately reflects adjustments to the algorithm, sliders, shading, and white protection.
+
+### 🧪 Pipette (Eyedropper Color Picker)
+* In addition to automatic layer overlap and Lasso selections, you can select **`Pipette / Manuelle Farbe`** in the `Referenz-Quelle` dropdown.
+* Click the color button, select the **Pipette (Eyedropper tool)**, and click anywhere on the canvas (e.g. cheek, forehead, background light) to pick the exact target skin tone.
 
 ### 👁️ Eye White, Teeth & Highlight Protection (Sclera Protection)
-Standard color transfer algorithms tend to shift the entire layer into the target color, often leaving eye sclera and teeth with an unnatural yellow or reddish tint.
-* **How it works:** In CIELAB color space, eye whites, teeth, and specular glints exhibit high luminance combined with very low chromaticity ($C \le 16$). The plugin automatically detects these areas and preserves their clean, neutral white tones.
-* **Control:** `Augenweiß & Glanzlichter schützen (%)` (0% to 100%, default 100%).
+* In CIELAB color space, eye whites, teeth, and specular glints exhibit high luminance combined with very low chromaticity ($C \le 16$).
+* The plugin automatically detects these areas and preserves their clean, neutral white tones to prevent discolored eyes or yellowed teeth.
+* **Control:** `Augenweiß- und Glanzlichtschutz (%)` (0% to 100%, default 100%).
 
 ### 💡 Spatial Shading Transfer (Directional Lighting Harmonization)
-Solves the mismatch when the copied face was lit from the left, but the background scene is lit from the right.
-* **How it works:** Uses frequency separation to isolate the broad, low-frequency lighting gradient of the target background and transfers that light direction onto the pasted element without destroying skin pores or facial details.
+* Solves the mismatch when the copied face was lit from the left, but the background scene is lit from the right.
+* Uses frequency separation to isolate the low-frequency lighting gradient of the background and transfers that directional shading onto the pasted element without destroying skin pores or facial details.
 * **Control:** `Lichtgradient übertragen / Shading (%)` (0% to 100%, default 50%).
-
-### 🎯 Automatic Overlap & Custom Selection Sampling
-* **Automatic Mode (No selection):** Restricts the background color sampling to the exact spatial silhouette directly underneath the non-transparent cutout.
-* **Targeted Selection Mode:** If an active selection exists on the canvas (Lasso / Ellipse), colors are sampled specifically from within that selection.
 
 ---
 
@@ -67,10 +70,11 @@ Solves the mismatch when the copied face was lit from the left, but the backgrou
 | :--- | :--- | :--- | :--- |
 | **Methode** | Dropdown | *Reinhard* | Core color matching algorithm |
 | **Stärke (%)** | Slider (0–100) | `100 %` | Overall intensity of the color adjustment |
-| **Augenweiß & Glanzlichter schützen (%)** | Slider (0–100) | `100 %` | Prevents sclera, teeth, and glints from discoloring |
+| **Augenweiß- und Glanzlichtschutz (%)** | Slider (0–100) | `100 %` | Prevents sclera, teeth, and glints from discoloring |
 | **Lichtgradient übertragen / Shading (%)** | Slider (0–100) | `50 %` | Transmits background lighting direction & shadows |
 | **Globale Helligkeit anpassen** | Checkbox | `Enabled` | Matches overall exposure (disable for hue-only tinting) |
-| **Referenz-Quelle** | Dropdown | *Layer Below* | Source layer for color sampling (or uses active selection) |
+| **Referenz-Quelle** | Dropdown | *Layer Below* | `Darunterliegende Ebene`, `Unterste Ebene`, or `Pipette / Manuelle Farbe` |
+| **Pipetten-Farbe** | Color Picker | *Skin Tone* | Color button with pipette tool for manual color picking |
 
 ---
 

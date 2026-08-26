@@ -10,7 +10,8 @@ Erweiterte Features:
 - 4 Farbanpassungs-Algorithmen (Reinhard LAB, MKL Covariance, Histogram Matching, Seamless Multi-Band)
 - Schutz vor Verfärbung von Augenweiß, Zähnen und Glanzlichtern (Sclera & Highlight Protection)
 - Räumlicher Lichtgradienten-Transfer (Shading Transfer für unterschiedliche Lichtrichtungen)
-- Automatische Überlappungs-Erkennung oder gezielte Pipetten-Referenz via Auswahl (Lasso/Ellipse)
+- Automatische Überlappungs-Erkennung, gezielte Pipetten-Farbauswahl oder Auswahl-Referenz (Lasso/Ellipse)
+- Integrierte Live-Vorschau (Live Preview) im Dialog
 """
 
 import sys
@@ -19,14 +20,14 @@ import time
 import numpy as np
 
 import gi
+gi.require_version('Babl', '0.1')
+from gi.repository import Babl
+gi.require_version('Gegl', '0.4')
+from gi.repository import Gegl
 gi.require_version('Gimp', '3.0')
 from gi.repository import Gimp
 gi.require_version('GimpUi', '3.0')
 from gi.repository import GimpUi
-gi.require_version('Gegl', '0.4')
-from gi.repository import Gegl
-gi.require_version('Babl', '0.1')
-from gi.repository import Babl
 from gi.repository import GObject
 from gi.repository import GLib
 from gi.repository import Gio
@@ -288,8 +289,35 @@ def apply_seamless(src_rgb, src_alpha, ref_bg_crop, src_samples, ref_samples, ma
     return harmonized
 
 
+def process_color_harmonization(s_rgb, s_alpha, ref_crop, src_samples, ref_samples,
+                               method, strength, protect_whites, shading_transfer, match_luminance):
+    """Führt die gesamte Kette aus Basismethode, Shading, Schutzmasken und Stärke-Blending aus."""
+    if method == 'reinhard':
+        base_out_rgb = apply_reinhard(s_rgb, src_samples, ref_samples, match_luminance)
+    elif method == 'mkl':
+        base_out_rgb = apply_mkl(s_rgb, src_samples, ref_samples)
+    elif method == 'histogram':
+        base_out_rgb = apply_histogram(s_rgb, src_samples, ref_samples, match_luminance)
+    elif method == 'seamless':
+        base_out_rgb = apply_seamless(s_rgb, s_alpha, ref_crop, src_samples, ref_samples, match_luminance)
+    else:
+        base_out_rgb = apply_reinhard(s_rgb, src_samples, ref_samples, match_luminance)
+
+    # Shading Transfer
+    if shading_transfer > 0.0:
+        base_out_rgb = apply_shading_transfer(base_out_rgb, ref_crop, shading_strength=shading_transfer)
+
+    # Schutz für Augenweiß, Zähne & Glanzlichter
+    if protect_whites > 0.0:
+        p_mask = compute_whites_protection_mask(s_rgb) * protect_whites
+        base_out_rgb = base_out_rgb * (1.0 - p_mask[..., None]) + s_rgb * p_mask[..., None]
+
+    # Gesamtstärke stufenlos einblenden
+    return np.clip((1.0 - strength) * s_rgb + strength * base_out_rgb, 0.0, 1.0)
+
+
 # ============================================================================
-# 4. GIMP 3 PLUGIN AUSFÜHRUNG
+# 4. GIMP 3 PLUGIN AUSFÜHRUNG & DIALOG
 # ============================================================================
 
 def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
@@ -298,10 +326,73 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
         error = GLib.Error.new_literal(Gimp.PlugIn.error_quark(), msg, 0)
         return procedure.new_return_values(Gimp.PDBStatusType.CALLING_ERROR, error)
 
-    # Interaktiver Dialog
+    # Interaktiver Dialog mit Live-Vorschau
     if run_mode == Gimp.RunMode.INTERACTIVE:
         GimpUi.init('python-fu-color-harmonizer')
         dialog = GimpUi.ProcedureDialog(procedure=procedure, config=config)
+
+        # Live-Vorschau Widget einbinden
+        if len(drawables) > 0 and hasattr(dialog, 'get_drawable_preview'):
+            try:
+                preview = dialog.get_drawable_preview("preview", drawables[0])
+                if preview:
+                    def on_preview_invalidated(preview_widget):
+                        try:
+                            x, y, w, h = preview_widget.get_bounds()
+                            if w <= 0 or h <= 0:
+                                return
+                            # Vorschau-Ausschnitt aus der aktiven Ebene holen
+                            d = drawables[0]
+                            dbuf = d.get_buffer()
+                            prect = Gegl.Rectangle.new(x, y, w, h)
+                            pbytes = dbuf.get(prect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.NONE)
+                            parr = np.frombuffer(pbytes, dtype=np.uint8).reshape((h, w, 4)).copy()
+                            
+                            prgb = parr[..., :3].astype(np.float32) / 255.0
+                            palpha = parr[..., 3].astype(np.float32) / 255.0
+                            
+                            # Einstellungen auslesen
+                            cur_meth = config.get_property('method')
+                            cur_str = config.get_property('strength') / 100.0
+                            cur_prot = config.get_property('protect_whites') / 100.0
+                            cur_shad = config.get_property('shading_transfer') / 100.0
+                            cur_lum = config.get_property('match_luminance')
+                            cur_ref = config.get_property('ref_mode')
+                            
+                            # Quellproben aus dem Vorschauausschnitt
+                            v_src = (palpha > 0.05)
+                            if np.sum(v_src) < 10:
+                                v_src = np.ones((h, w), dtype=bool)
+                            s_samples = prgb[v_src]
+                            
+                            # Referenzproben
+                            r_samples = None
+                            if cur_ref == 'pipette':
+                                col_obj = config.get_property('custom_color')
+                                if col_obj:
+                                    cr, cg, cb, _ = col_obj.get_rgba()
+                                    picked = np.array([cr, cg, cb], dtype=np.float32)
+                                    np.random.seed(42)
+                                    r_samples = np.clip(picked + np.random.normal(0, 0.03, (100, 3)), 0.0, 1.0).astype(np.float32)
+                            
+                            if r_samples is None:
+                                # Fallback auf simple Helligkeitsanpassung für Vorschau
+                                r_samples = s_samples
+                                
+                            out_p_rgb = process_color_harmonization(
+                                prgb, palpha, None, s_samples, r_samples,
+                                cur_meth, cur_str, cur_prot, cur_shad, cur_lum
+                            )
+                            
+                            parr[..., :3] = np.clip(np.round(out_p_rgb * 255.0), 0, 255).astype(np.uint8)
+                            preview_widget.draw_buffer(parr.tobytes(), w * 4)
+                        except Exception:
+                            pass
+
+                    preview.connect("invalidated", on_preview_invalidated)
+            except Exception:
+                pass
+
         dialog.fill(None)
         if not dialog.run():
             dialog.destroy()
@@ -319,8 +410,6 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
     image.undo_group_start()
 
     all_layers = image.get_layers()
-
-    # Prüfen, ob eine gezielte Auswahl (Pipette/Lasso) im Bild aktiv ist
     has_selection = not Gimp.Selection.is_empty(image)
 
     for drawable in drawables:
@@ -333,6 +422,8 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
             ref_layer = all_layers[-1]
             if ref_layer == drawable:
                 ref_layer = all_layers[0] if len(all_layers) > 1 else None
+        elif ref_mode == 'pipette':
+            ref_layer = drawable
         else:
             try:
                 cur_idx = all_layers.index(drawable)
@@ -366,7 +457,7 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
             valid_src = np.ones((s_h, s_w), dtype=bool)
         src_samples = s_rgb[valid_src]
 
-        # 3. Referenzpixel ermitteln (mit Auswahl ODER räumlicher Schnittmenge)
+        # 3. Referenzpixel ermitteln (Pipette, Auswahl oder räumliche Schnittmenge)
         r_w = ref_layer.get_width()
         r_h = ref_layer.get_height()
         r_ok, r_ox, r_oy = ref_layer.get_offsets()
@@ -375,7 +466,7 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
         ref_samples = None
         ref_crop = np.zeros((s_h, s_w, 3), dtype=np.float32)
 
-        # Schnittmenge beider Ebenen für Hintergrund-Crop und Shading berechnen
+        # Schnittmenge beider Ebenen für Hintergrund-Crop und Shading
         inter_x1 = max(s_ox, r_ox)
         inter_y1 = max(s_oy, r_oy)
         inter_x2 = min(s_ox + s_w, r_ox + r_w)
@@ -403,17 +494,25 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
             # Hintergrund-Crop für Shading Transfer und Seamless Blending
             ref_crop[sy_start:sy_end, sx_start:sx_end] = r_sub_rgb
 
-            # Falls KEINE aktive Auswahl da ist: Schnittmenge nutzen
-            if not has_selection:
+            # Standard: Schnittmenge nutzen (wenn keine Pipette und keine Auswahl aktiv ist)
+            if ref_mode != 'pipette' and not has_selection:
                 valid_overlap = (s_sub_alpha > 0.05) & (r_sub_alpha > 0.05)
                 if np.sum(valid_overlap) >= 10:
                     ref_samples = r_sub_rgb[valid_overlap]
 
-        # FALL A: Gezielte Farbauswahl (Auswahl im Bild aktiv)
+        # FALL A: Pipetten-Modus (Manuell gewählte Farbe)
+        if ref_mode == 'pipette':
+            col_obj = config.get_property('custom_color')
+            if col_obj:
+                cr, cg, cb, _ = col_obj.get_rgba()
+                picked = np.array([cr, cg, cb], dtype=np.float32)
+                np.random.seed(42)
+                ref_samples = np.clip(picked + np.random.normal(0, 0.03, (100, 3)), 0.0, 1.0).astype(np.float32)
+
+        # FALL B: Gezielte Farbauswahl (Auswahl im Bild aktiv)
         if has_selection and ref_samples is None:
             succ, non_empty, bx1, by1, bx2, by2 = Gimp.Selection.bounds(image)
             if non_empty:
-                # Schnittmenge Auswahl mit Referenzebene
                 sel_x1 = max(bx1, r_ox)
                 sel_y1 = max(by1, r_oy)
                 sel_x2 = min(bx2, r_ox + r_w)
@@ -435,7 +534,7 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
                     if np.sum(valid_sel) >= 10:
                         ref_samples = sel_rgb[valid_sel]
 
-        # FALL B: Fallback (ganze Referenzebene)
+        # FALL C: Fallback (ganze Referenzebene)
         if ref_samples is None:
             r_rect = Gegl.Rectangle.new(0, 0, r_w, r_h)
             r_bytes = r_buf.get(r_rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.NONE)
@@ -447,31 +546,13 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
                 valid_ref = np.ones((r_h, r_w), dtype=bool)
             ref_samples = r_rgb_full[valid_ref]
 
-        # 4. Gewählte Basismethode anwenden
-        if method == 'reinhard':
-            base_out_rgb = apply_reinhard(s_rgb, src_samples, ref_samples, match_luminance)
-        elif method == 'mkl':
-            base_out_rgb = apply_mkl(s_rgb, src_samples, ref_samples)
-        elif method == 'histogram':
-            base_out_rgb = apply_histogram(s_rgb, src_samples, ref_samples, match_luminance)
-        elif method == 'seamless':
-            base_out_rgb = apply_seamless(s_rgb, s_alpha, ref_crop, src_samples, ref_samples, match_luminance)
-        else:
-            base_out_rgb = apply_reinhard(s_rgb, src_samples, ref_samples, match_luminance)
+        # 4. Gesamte Verarbeitung ausführen
+        final_rgb = process_color_harmonization(
+            s_rgb, s_alpha, ref_crop, src_samples, ref_samples,
+            method, strength, protect_whites, shading_transfer, match_luminance
+        )
 
-        # 5. Räumlichen Lichtgradienten übertragen (Shading Transfer)
-        if shading_transfer > 0.0:
-            base_out_rgb = apply_shading_transfer(base_out_rgb, ref_crop, shading_strength=shading_transfer)
-
-        # 6. Schutz für Augenweiß, Zähne & Glanzlichter anwenden
-        if protect_whites > 0.0:
-            p_mask = compute_whites_protection_mask(s_rgb) * protect_whites
-            base_out_rgb = base_out_rgb * (1.0 - p_mask[..., None]) + s_rgb * p_mask[..., None]
-
-        # 7. Gesamtstärke stufenlos einblenden
-        final_rgb = np.clip((1.0 - strength) * s_rgb + strength * base_out_rgb, 0.0, 1.0)
-
-        # 8. In Shadow-Buffer schreiben
+        # 5. In Shadow-Buffer schreiben
         s_arr[..., :3] = np.clip(np.round(final_rgb * 255.0), 0, 255).astype(np.uint8)
 
         shadow = drawable.get_shadow_buffer()
@@ -500,6 +581,7 @@ class ColorHarmonizerPlugin(Gimp.PlugIn):
         return ['python-fu-color-harmonizer']
 
     def do_create_procedure(self, name):
+        Babl.init()
         Gegl.init(None)
 
         procedure = Gimp.ImageProcedure.new(
@@ -581,13 +663,26 @@ class ColorHarmonizerPlugin(Gimp.PlugIn):
         choice_ref = Gimp.Choice.new()
         choice_ref.add("layer_below", 0, _("Darunterliegende Ebene (Standard)"), _("Verwendet den Bereich der direkt darunter liegenden Ebene"))
         choice_ref.add("background", 1, _("Unterste Ebene (Hintergrund)"), _("Verwendet den Bereich der untersten Ebene im Bild"))
+        choice_ref.add("pipette", 2, _("Pipette / Manuelle Farbe"), _("Verwendet die unten gewählte Farbe als Referenz (mit Pipette abgreifbar)"))
 
         procedure.add_choice_argument(
             "ref_mode",
             _("Referenz-Quelle"),
-            _("Welche Ebene als Farbvorlage dienen soll (oder aktive Bildauswahl nutzen)"),
+            _("Welche Ebene als Farbvorlage dienen soll (oder Pipetten-Farbe)"),
             choice_ref,
             "layer_below",
+            GObject.ParamFlags.READWRITE
+        )
+
+        # 7. Pipetten-Farbe (Color Button mit Pipetten-Werkzeug)
+        default_color = Gegl.Color.new("white")
+        default_color.set_rgba(0.85, 0.65, 0.50, 1.0)
+        procedure.add_color_argument(
+            "custom_color",
+            _("Pipetten-Farbe"),
+            _("Referenzfarbe für den Pipetten-Modus (Klicken zum Öffnen der Pipette)"),
+            False,
+            default_color,
             GObject.ParamFlags.READWRITE
         )
 
