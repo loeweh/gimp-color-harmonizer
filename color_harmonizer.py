@@ -3,14 +3,14 @@
 """
 Color Harmonizer GIMP 3 Plugin
 ==============================
-Passt die Farben, Beleuchtung und Übergänge einer eingefügten Ebene / Auswahl
+Passt Farben, Beleuchtungsrichtung und Kantenübergänge einer eingefügten Ebene / Auswahl
 an das Zielbild oder eine Referenzebene an (Facefusion / Compositing Style).
 
-Unterstützt 4 auswählbare Methoden:
-1. Reinhard Color Transfer (LAB-Farbraum) - Natürlich, ideal für Gesichter/Hauttöne.
-2. Linear Covariance Transfer (MKL) - Mathematisch exakte Kovarianz-Matrix-Anpassung.
-3. Histogram Matching (CDF) - Übertragung der kumulativen Helligkeits-/Farbverteilung.
-4. Seamless Blending (Multi-Band / Poisson) - Farbanpassung kombiniert mit weicher Kanten-Gradienten-Harmonisierung.
+Erweiterte Features:
+- 4 Farbanpassungs-Algorithmen (Reinhard LAB, MKL Covariance, Histogram Matching, Seamless Multi-Band)
+- Schutz vor Verfärbung von Augenweiß, Zähnen und Glanzlichtern (Sclera & Highlight Protection)
+- Räumlicher Lichtgradienten-Transfer (Shading Transfer für unterschiedliche Lichtrichtungen)
+- Automatische Überlappungs-Erkennung oder gezielte Pipetten-Referenz via Auswahl (Lasso/Ellipse)
 """
 
 import sys
@@ -100,10 +100,87 @@ def lab_to_rgb(lab):
 
 
 # ============================================================================
-# 2. FARBANPASSUNGS-METHODEN (ALGORITHMEN)
+# 2. HILFSFUNKTIONEN (FILTER, SCHUTZMASKEN & SHADING)
 # ============================================================================
 
-def apply_reinhard(src_rgb, src_samples, ref_samples, match_luminance=True, strength=1.0):
+def fast_gaussian_blur(img, radius=4, passes=3):
+    """Schneller Multi-Pass Box-Blur zur Gauß-Approximation in reinem NumPy."""
+    if radius <= 0:
+        return img
+    kernel_size = 2 * radius + 1
+    out = img.astype(np.float32)
+    is_3d = (out.ndim == 3)
+    
+    for _ in range(passes):
+        # Horizontal
+        pad_shape = ((0, 0), (radius + 1, radius), (0, 0)) if is_3d else ((0, 0), (radius + 1, radius))
+        padded = np.pad(out, pad_shape, mode='edge')
+        cs = np.cumsum(padded, axis=1)
+        out = (cs[:, kernel_size:] - cs[:, :-kernel_size]) / kernel_size
+            
+        # Vertikal
+        pad_shape = ((radius + 1, radius), (0, 0), (0, 0)) if is_3d else ((radius + 1, radius), (0, 0))
+        padded = np.pad(out, pad_shape, mode='edge')
+        cs = np.cumsum(padded, axis=0)
+        out = (cs[kernel_size:, :] - cs[:-kernel_size, :]) / kernel_size
+            
+    return out
+
+
+def compute_whites_protection_mask(src_rgb):
+    """
+    Erkennt Augenweiß (Sclera), Zähne und helle Glanzlichter im CIELAB-Farbraum.
+    Gibt eine weiche Schutzmaske [0..1] zurück:
+    1.0 = Schützen (Originalfarbe erhalten)
+    0.0 = Vollständige Farbanpassung
+    """
+    src_lab = rgb_to_lab(src_rgb)
+    L = src_lab[..., 0]
+    a = src_lab[..., 1]
+    b = src_lab[..., 2]
+    chroma = np.sqrt(a**2 + b**2)
+    
+    # 1. Glanzlichter (sehr helle Spitzlichter/Reflexionen)
+    specular = np.clip((L - 85.0) / 10.0, 0.0, 1.0)
+    
+    # 2. Augenweiß & Zähne (hohe Helligkeit L >= 55 bei geringer Sättigung Chroma <= 16)
+    lum_factor = np.clip((L - 55.0) / 15.0, 0.0, 1.0)
+    neutral_factor = np.clip((16.0 - chroma) / 10.0, 0.0, 1.0)
+    sclera = lum_factor * neutral_factor
+    
+    return np.clip(np.maximum(specular, sclera), 0.0, 1.0)
+
+
+def apply_shading_transfer(adjusted_rgb, ref_bg_crop, shading_strength=0.5):
+    """
+    Überträgt den räumlichen Hell-Dunkel-Verlauf (Lichtrichtung) des Hintergrunds
+    auf das eingefügte Element via Frequenz-Separation.
+    """
+    if shading_strength <= 0.0 or ref_bg_crop is None or ref_bg_crop.shape != adjusted_rgb.shape:
+        return adjusted_rgb
+        
+    src_lab = rgb_to_lab(adjusted_rgb)
+    ref_lab = rgb_to_lab(ref_bg_crop)
+    
+    h, w = adjusted_rgb.shape[:2]
+    blur_rad = max(4, min(h, w) // 8)
+    
+    # Großflächige Beleuchtung von Quelle und Hintergrund isolieren
+    low_src_l = fast_gaussian_blur(src_lab[..., 0], radius=blur_rad, passes=2)
+    low_ref_l = fast_gaussian_blur(ref_lab[..., 0], radius=blur_rad, passes=2)
+    
+    # Beleuchtungsdifferenz berechnen und auf die Helligkeitskarte addieren
+    delta_l = (low_ref_l - low_src_l) * shading_strength
+    src_lab[..., 0] = np.clip(src_lab[..., 0] + delta_l, 0.0, 100.0)
+    
+    return lab_to_rgb(src_lab)
+
+
+# ============================================================================
+# 3. FARBANPASSUNGS-METHODEN (ALGORITHMEN)
+# ============================================================================
+
+def apply_reinhard(src_rgb, src_samples, ref_samples, match_luminance=True):
     """1. Reinhard Color Transfer (CIELAB)"""
     src_lab_samples = rgb_to_lab(src_samples)
     ref_lab_samples = rgb_to_lab(ref_samples)
@@ -126,12 +203,10 @@ def apply_reinhard(src_rgb, src_samples, ref_samples, match_luminance=True, stre
     out_lab[..., 2] = ((src_lab[..., 2] - mu_s[2]) / sigma_s[2]) * sigma_r[2] + mu_r[2]
     
     out_lab[..., 0] = np.clip(out_lab[..., 0], 0.0, 100.0)
-    out_rgb = lab_to_rgb(out_lab)
-    
-    return np.clip((1.0 - strength) * src_rgb + strength * out_rgb, 0.0, 1.0)
+    return lab_to_rgb(out_lab)
 
 
-def apply_mkl(src_rgb, src_samples, ref_samples, strength=1.0):
+def apply_mkl(src_rgb, src_samples, ref_samples):
     """2. Monge-Kantorovitch Linear (MKL) / Kovarianz-Anpassung"""
     X_s = src_samples.reshape(-1, 3).astype(np.float64)
     X_r = ref_samples.reshape(-1, 3).astype(np.float64)
@@ -157,12 +232,10 @@ def apply_mkl(src_rgb, src_samples, ref_samples, strength=1.0):
     orig_shape = src_rgb.shape
     X_src_all = src_rgb.reshape(-1, 3).astype(np.float64)
     X_out = (X_src_all - mu_s) @ T + mu_r
-    out_rgb = np.clip(X_out.reshape(orig_shape).astype(np.float32), 0.0, 1.0)
-    
-    return np.clip((1.0 - strength) * src_rgb + strength * out_rgb, 0.0, 1.0)
+    return np.clip(X_out.reshape(orig_shape).astype(np.float32), 0.0, 1.0)
 
 
-def apply_histogram(src_rgb, src_samples, ref_samples, match_luminance=True, strength=1.0):
+def apply_histogram(src_rgb, src_samples, ref_samples, match_luminance=True):
     """3. Histogram Matching (CDF)"""
     src_lab_samples = rgb_to_lab(src_samples)
     ref_lab_samples = rgb_to_lab(ref_samples)
@@ -194,35 +267,12 @@ def apply_histogram(src_rgb, src_samples, ref_samples, match_luminance=True, str
         out_lab[..., c] = mapped.reshape(s_chan_full.shape)
         
     out_lab[..., 0] = np.clip(out_lab[..., 0], 0.0, 100.0)
-    out_rgb = lab_to_rgb(out_lab)
-    return np.clip((1.0 - strength) * src_rgb + strength * out_rgb, 0.0, 1.0)
+    return lab_to_rgb(out_lab)
 
 
-def fast_gaussian_blur(img, radius=4, passes=3):
-    """Schneller Multi-Pass Box-Blur zur Gauß-Approximation in reinem NumPy."""
-    if radius <= 0:
-        return img
-    kernel_size = 2 * radius + 1
-    out = img.astype(np.float32)
-    is_3d = (out.ndim == 3)
-    
-    for _ in range(passes):
-        pad_shape = ((0, 0), (radius + 1, radius), (0, 0)) if is_3d else ((0, 0), (radius + 1, radius))
-        padded = np.pad(out, pad_shape, mode='edge')
-        cs = np.cumsum(padded, axis=1)
-        out = (cs[:, kernel_size:] - cs[:, :-kernel_size]) / kernel_size
-            
-        pad_shape = ((radius + 1, radius), (0, 0), (0, 0)) if is_3d else ((radius + 1, radius), (0, 0))
-        padded = np.pad(out, pad_shape, mode='edge')
-        cs = np.cumsum(padded, axis=0)
-        out = (cs[kernel_size:, :] - cs[:-kernel_size, :]) / kernel_size
-            
-    return out
-
-
-def apply_seamless(src_rgb, src_alpha, ref_bg_crop, src_samples, ref_samples, match_luminance=True, strength=1.0):
-    """4. Seamless Blending (Multi-Band / Poisson Hybrid)"""
-    harmonized = apply_reinhard(src_rgb, src_samples, ref_samples, match_luminance, strength=1.0)
+def apply_seamless(src_rgb, src_alpha, ref_bg_crop, src_samples, ref_samples, match_luminance=True):
+    """4. Seamless Blending (Multi-Band / Laplace Hybrid)"""
+    harmonized = apply_reinhard(src_rgb, src_samples, ref_samples, match_luminance)
     
     if ref_bg_crop is not None and ref_bg_crop.shape == src_rgb.shape:
         smooth_alpha = fast_gaussian_blur(src_alpha, radius=3, passes=2)
@@ -233,16 +283,13 @@ def apply_seamless(src_rgb, src_alpha, ref_bg_crop, src_samples, ref_samples, ma
         high_src = harmonized - low_src
         
         blended_low = low_src * smooth_alpha + low_bg * (1.0 - smooth_alpha)
-        reconstructed = np.clip(blended_low + high_src, 0.0, 1.0)
-        out_rgb = reconstructed
-    else:
-        out_rgb = harmonized
-        
-    return np.clip((1.0 - strength) * src_rgb + strength * out_rgb, 0.0, 1.0)
+        return np.clip(blended_low + high_src, 0.0, 1.0)
+    
+    return harmonized
 
 
 # ============================================================================
-# 3. GIMP 3 PLUGIN DEFINITION
+# 4. GIMP 3 PLUGIN AUSFÜHRUNG
 # ============================================================================
 
 def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
@@ -263,6 +310,8 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
 
     method = config.get_property('method')
     strength = config.get_property('strength') / 100.0
+    protect_whites = config.get_property('protect_whites') / 100.0
+    shading_transfer = config.get_property('shading_transfer') / 100.0
     match_luminance = config.get_property('match_luminance')
     ref_mode = config.get_property('ref_mode')
 
@@ -270,6 +319,9 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
     image.undo_group_start()
 
     all_layers = image.get_layers()
+
+    # Prüfen, ob eine gezielte Auswahl (Pipette/Lasso) im Bild aktiv ist
+    has_selection = not Gimp.Selection.is_empty(image)
 
     for drawable in drawables:
         if not isinstance(drawable, Gimp.Layer):
@@ -314,35 +366,32 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
             valid_src = np.ones((s_h, s_w), dtype=bool)
         src_samples = s_rgb[valid_src]
 
-        # 3. Zielpixel räumlich exakt unter der Quelle auslesen
+        # 3. Referenzpixel ermitteln (mit Auswahl ODER räumlicher Schnittmenge)
         r_w = ref_layer.get_width()
         r_h = ref_layer.get_height()
         r_ok, r_ox, r_oy = ref_layer.get_offsets()
         r_buf = ref_layer.get_buffer()
 
-        # Schnittmenge beider Ebenen auf der Gesamtleinwand berechnen
+        ref_samples = None
+        ref_crop = np.zeros((s_h, s_w, 3), dtype=np.float32)
+
+        # Schnittmenge beider Ebenen für Hintergrund-Crop und Shading berechnen
         inter_x1 = max(s_ox, r_ox)
         inter_y1 = max(s_oy, r_oy)
         inter_x2 = min(s_ox + s_w, r_ox + r_w)
         inter_y2 = min(s_oy + s_h, r_oy + r_h)
 
-        ref_samples = None
-        ref_crop = np.zeros((s_h, s_w, 3), dtype=np.float32)
-
         if inter_x2 > inter_x1 and inter_y2 > inter_y1:
-            # Koordinaten bezogen auf Quelle
             sx_start = inter_x1 - s_ox
             sy_start = inter_y1 - s_oy
             sx_end = inter_x2 - s_ox
             sy_end = inter_y2 - s_oy
             
-            # Koordinaten bezogen auf Referenzebene
             rx_start = inter_x1 - r_ox
             ry_start = inter_y1 - r_oy
             rw_inter = inter_x2 - inter_x1
             rh_inter = inter_y2 - inter_y1
 
-            # Nur den überlappenden Ausschnitt aus der Referenzebene holen
             r_sub_rect = Gegl.Rectangle.new(rx_start, ry_start, rw_inter, rh_inter)
             r_sub_bytes = r_buf.get(r_sub_rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.NONE)
             r_sub_arr = np.frombuffer(r_sub_bytes, dtype=np.uint8).reshape((rh_inter, rw_inter, 4))
@@ -351,15 +400,42 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
             r_sub_alpha = r_sub_arr[..., 3].astype(np.float32) / 255.0
             s_sub_alpha = s_alpha[sy_start:sy_end, sx_start:sx_end]
 
-            # Referenz-Crop für Seamless Blending vorbereiten
+            # Hintergrund-Crop für Shading Transfer und Seamless Blending
             ref_crop[sy_start:sy_end, sx_start:sx_end] = r_sub_rgb
 
-            # MASKIERUNG: Nur Pixel verwenden, die in der QUELLE UND in der REFERENZ nicht transparent sind!
-            valid_overlap = (s_sub_alpha > 0.05) & (r_sub_alpha > 0.05)
-            if np.sum(valid_overlap) >= 10:
-                ref_samples = r_sub_rgb[valid_overlap]
+            # Falls KEINE aktive Auswahl da ist: Schnittmenge nutzen
+            if not has_selection:
+                valid_overlap = (s_sub_alpha > 0.05) & (r_sub_alpha > 0.05)
+                if np.sum(valid_overlap) >= 10:
+                    ref_samples = r_sub_rgb[valid_overlap]
 
-        # Sicherheits-Fallback: Falls keine Überlappung vorhanden ist, ganze Referenzebene nutzen
+        # FALL A: Gezielte Farbauswahl (Auswahl im Bild aktiv)
+        if has_selection and ref_samples is None:
+            succ, non_empty, bx1, by1, bx2, by2 = Gimp.Selection.bounds(image)
+            if non_empty:
+                # Schnittmenge Auswahl mit Referenzebene
+                sel_x1 = max(bx1, r_ox)
+                sel_y1 = max(by1, r_oy)
+                sel_x2 = min(bx2, r_ox + r_w)
+                sel_y2 = min(by2, r_oy + r_h)
+                
+                if sel_x2 > sel_x1 and sel_y2 > sel_y1:
+                    sel_rx = sel_x1 - r_ox
+                    sel_ry = sel_y1 - r_oy
+                    sel_rw = sel_x2 - sel_x1
+                    sel_rh = sel_y2 - sel_y1
+                    
+                    sel_rect = Gegl.Rectangle.new(sel_rx, sel_ry, sel_rw, sel_rh)
+                    sel_bytes = r_buf.get(sel_rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.NONE)
+                    sel_arr = np.frombuffer(sel_bytes, dtype=np.uint8).reshape((sel_rh, sel_rw, 4))
+                    
+                    sel_rgb = sel_arr[..., :3].astype(np.float32) / 255.0
+                    sel_alpha = sel_arr[..., 3].astype(np.float32) / 255.0
+                    valid_sel = (sel_alpha > 0.05)
+                    if np.sum(valid_sel) >= 10:
+                        ref_samples = sel_rgb[valid_sel]
+
+        # FALL B: Fallback (ganze Referenzebene)
         if ref_samples is None:
             r_rect = Gegl.Rectangle.new(0, 0, r_w, r_h)
             r_bytes = r_buf.get(r_rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.NONE)
@@ -371,20 +447,32 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
                 valid_ref = np.ones((r_h, r_w), dtype=bool)
             ref_samples = r_rgb_full[valid_ref]
 
-        # 4. Gewählte Methode anwenden
+        # 4. Gewählte Basismethode anwenden
         if method == 'reinhard':
-            out_rgb = apply_reinhard(s_rgb, src_samples, ref_samples, match_luminance, strength)
+            base_out_rgb = apply_reinhard(s_rgb, src_samples, ref_samples, match_luminance)
         elif method == 'mkl':
-            out_rgb = apply_mkl(s_rgb, src_samples, ref_samples, strength)
+            base_out_rgb = apply_mkl(s_rgb, src_samples, ref_samples)
         elif method == 'histogram':
-            out_rgb = apply_histogram(s_rgb, src_samples, ref_samples, match_luminance, strength)
+            base_out_rgb = apply_histogram(s_rgb, src_samples, ref_samples, match_luminance)
         elif method == 'seamless':
-            out_rgb = apply_seamless(s_rgb, s_alpha, ref_crop, src_samples, ref_samples, match_luminance, strength)
+            base_out_rgb = apply_seamless(s_rgb, s_alpha, ref_crop, src_samples, ref_samples, match_luminance)
         else:
-            out_rgb = apply_reinhard(s_rgb, src_samples, ref_samples, match_luminance, strength)
+            base_out_rgb = apply_reinhard(s_rgb, src_samples, ref_samples, match_luminance)
 
-        # 5. Neues Bild in Shadow-Buffer schreiben
-        s_arr[..., :3] = np.clip(np.round(out_rgb * 255.0), 0, 255).astype(np.uint8)
+        # 5. Räumlichen Lichtgradienten übertragen (Shading Transfer)
+        if shading_transfer > 0.0:
+            base_out_rgb = apply_shading_transfer(base_out_rgb, ref_crop, shading_strength=shading_transfer)
+
+        # 6. Schutz für Augenweiß, Zähne & Glanzlichter anwenden
+        if protect_whites > 0.0:
+            p_mask = compute_whites_protection_mask(s_rgb) * protect_whites
+            base_out_rgb = base_out_rgb * (1.0 - p_mask[..., None]) + s_rgb * p_mask[..., None]
+
+        # 7. Gesamtstärke stufenlos einblenden
+        final_rgb = np.clip((1.0 - strength) * s_rgb + strength * base_out_rgb, 0.0, 1.0)
+
+        # 8. In Shadow-Buffer schreiben
+        s_arr[..., :3] = np.clip(np.round(final_rgb * 255.0), 0, 255).astype(np.uint8)
 
         shadow = drawable.get_shadow_buffer()
         shadow.set(s_rect, "R'G'B'A u8", s_arr.tobytes())
@@ -399,6 +487,10 @@ def color_harmonizer_run(procedure, run_mode, image, drawables, config, data):
 
     return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, GLib.Error())
 
+
+# ============================================================================
+# 5. GIMP 3 PLUGIN REGISTRIERUNG & UI DEFINITION
+# ============================================================================
 
 class ColorHarmonizerPlugin(Gimp.PlugIn):
     def do_set_i18n(self, procname):
@@ -426,7 +518,7 @@ class ColorHarmonizerPlugin(Gimp.PlugIn):
 
         procedure.set_documentation(
             _("Farben von Ebenen und Auswahlen harmonisieren"),
-            _("Passt Farben, Kontrast und Beleuchtung einer Ebene oder Auswahl an den Hintergrund / eine Referenzebene an (Facefusion / Compositing Style)."),
+            _("Passt Farben, Kontrast, Lichtrichtung und Kanten einer Ebene an den Hintergrund an (Facefusion / Compositing Style)."),
             name
         )
         procedure.set_menu_label(_("Farben harmonisieren (Color Harmonizer)..."))
@@ -438,7 +530,7 @@ class ColorHarmonizerPlugin(Gimp.PlugIn):
         choice_method.add("reinhard", 0, _("1. Reinhard (LAB - Natürlich / Hauttöne)"), _("Passt Mittelwert und Varianz im CIELAB-Farbraum an. Sehr natürlich."))
         choice_method.add("mkl", 1, _("2. Linear Covariance (MKL)"), _("Monge-Kantorovitch Kovarianzmatrix-Anpassung."))
         choice_method.add("histogram", 2, _("3. Histogram Matching (CDF)"), _("Gleicht die kumulierte Tonwertkurve pro Farbkanal an."))
-        choice_method.add("seamless", 3, _("4. Seamless Blending (Multi-Band / Poisson)"), _("Farbanpassung + weiche Gradienten-Verschmelzung der Ränder."))
+        choice_method.add("seamless", 3, _("4. Seamless Blending (Multi-Band / Laplace)"), _("Farbanpassung + weiche Gradienten-Verschmelzung der Ränder."))
 
         procedure.add_choice_argument(
             "method",
@@ -449,25 +541,43 @@ class ColorHarmonizerPlugin(Gimp.PlugIn):
             GObject.ParamFlags.READWRITE
         )
 
-        # 2. Stärke (Schieberegler 0..100)
+        # 2. Gesamtstärke (Schieberegler 0..100)
         procedure.add_double_argument(
             "strength",
             _("Stärke (%)"),
-            _("Stärke der Angleichung von 0% (Original) bis 100% (Vollständig)"),
+            _("Gesamtstärke der Farbanpassung von 0% (Original) bis 100% (Vollständig)"),
             0.0, 100.0, 100.0,
             GObject.ParamFlags.READWRITE
         )
 
-        # 3. Helligkeit berücksichtigen (Checkbox)
+        # 3. Augenweiß & Glanzlichter schützen (Schieberegler 0..100)
+        procedure.add_double_argument(
+            "protect_whites",
+            _("Augenweiß & Glanzlichter schützen (%)"),
+            _("Schützt Augenweiß (Sclera), Zähne und Glanzlichter vor rötlichen/gelblichen Verfärbungen"),
+            0.0, 100.0, 100.0,
+            GObject.ParamFlags.READWRITE
+        )
+
+        # 4. Lichtgradient / Shading übertragen (Schieberegler 0..100)
+        procedure.add_double_argument(
+            "shading_transfer",
+            _("Lichtgradient übertragen / Shading (%)"),
+            _("Überträgt den räumlichen Hell-Dunkel-Verlauf (Lichtrichtung) der Zielszene auf das Gesicht"),
+            0.0, 100.0, 50.0,
+            GObject.ParamFlags.READWRITE
+        )
+
+        # 5. Helligkeit berücksichtigen (Checkbox)
         procedure.add_boolean_argument(
             "match_luminance",
-            _("Helligkeit anpassen"),
+            _("Globale Helligkeit anpassen"),
             _("Helligkeit und Kontrast ebenfalls anpassen (deaktivieren für reine Farbtonangleichung)"),
             True,
             GObject.ParamFlags.READWRITE
         )
 
-        # 4. Referenzquelle (Dropdown)
+        # 6. Referenzquelle (Dropdown)
         choice_ref = Gimp.Choice.new()
         choice_ref.add("layer_below", 0, _("Darunterliegende Ebene (Standard)"), _("Verwendet den Bereich der direkt darunter liegenden Ebene"))
         choice_ref.add("background", 1, _("Unterste Ebene (Hintergrund)"), _("Verwendet den Bereich der untersten Ebene im Bild"))
@@ -475,7 +585,7 @@ class ColorHarmonizerPlugin(Gimp.PlugIn):
         procedure.add_choice_argument(
             "ref_mode",
             _("Referenz-Quelle"),
-            _("Welche Ebene als Farbvorlage dienen soll"),
+            _("Welche Ebene als Farbvorlage dienen soll (oder aktive Bildauswahl nutzen)"),
             choice_ref,
             "layer_below",
             GObject.ParamFlags.READWRITE
