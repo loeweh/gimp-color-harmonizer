@@ -550,11 +550,11 @@ class ColorHarmonizerPlugin(Gimp.PlugIn):
             GObject.ParamFlags.READWRITE
         )
 
-        # 3. Augenweiß & Glanzlichter schützen (Schieberegler 0..100)
+        # 3. Augenweiß und Glanzlichter schützen (Schieberegler 0..100)
         procedure.add_double_argument(
             "protect_whites",
-            _("Augenweiß & Glanzlichter schützen (%)"),
-            _("Schützt Augenweiß (Sclera), Zähne und Glanzlichter vor rötlichen/gelblichen Verfärbungen"),
+            _("Augenweiß- und Glanzlichtschutz (%)"),
+            _("Schützt Augenweiß (Sclera), Zähne und Glanzlichter vor Verfärbungen"),
             0.0, 100.0, 100.0,
             GObject.ParamFlags.READWRITE
         )
